@@ -1,18 +1,17 @@
 extern crate sys_info;
+extern crate spin;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread::spawn;
-use std::thread::JoinHandle;
+use std::sync::{Arc};
+use std::thread::{JoinHandle, yield_now, spawn};
 
 struct Job {
     func: Box<dyn Fn(*mut u64, usize, usize)>,
     elems: *mut u64,
     num: usize,
     work_index: AtomicUsize,
-    done_mutex: Arc<Mutex<usize>>,
-    signal: Arc<Condvar>,
+    done_index: AtomicUsize,
 }
 unsafe impl Send for Job {}
 unsafe impl Sync for Job {}
@@ -27,9 +26,7 @@ impl Job {
         loop {
             let index = self.work_index.fetch_add(1, Ordering::Relaxed);
             if index >= self.num {
-                let mut guard = self.done_mutex.lock().unwrap();
-                *guard += 1;
-                self.signal.notify_one();
+                self.done_index.fetch_add(1, Ordering::Relaxed);
                 break;
             }
             (self.func)(self.elems, self.num, index);
@@ -37,14 +34,11 @@ impl Job {
     }
     fn wait(&self, num: usize) {
         loop {
-            let guard = self.done_mutex.lock().unwrap();
-            if *guard >= num {
+            let guard = self.done_index.load(Ordering::Relaxed);
+            if guard >= num {
                 break;
             }
-            let _ = self
-                .signal
-                .wait(guard)
-                .expect("condvar wait should never fail");
+            yield_now();
         }
     }
 }
@@ -76,9 +70,8 @@ impl Pool {
         let job = Job {
             elems: elems.as_mut_ptr() as *mut u64,
             num: elems.len(),
-            done_mutex: Arc::new(Mutex::new(0)),
+            done_index: AtomicUsize::new(0),
             work_index: AtomicUsize::new(0),
-            signal: Arc::new(Condvar::new()),
             func: Box::new(move |ptr, num, index| {
                 let ptr = ptr as *mut A;
                 let slice = unsafe { std::slice::from_raw_parts_mut(ptr, num) };
