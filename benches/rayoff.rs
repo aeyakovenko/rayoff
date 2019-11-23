@@ -1,6 +1,8 @@
 #![feature(test)]
+extern crate rayon;
 extern crate test;
 
+use rayoff::Pool;
 use rayon::prelude::*;
 
 #[bench]
