@@ -11,7 +11,8 @@ struct Job {
     elems: *mut u64,
     num: usize,
     work_index: AtomicUsize,
-    done_index: AtomicUsize,
+    done_mutex: Arc<Mutex<usize>>,
+    signal: Arc<Condvar>,
 }
 unsafe impl Send for Job {}
 unsafe impl Sync for Job {}
@@ -19,26 +20,30 @@ unsafe impl Sync for Job {}
 pub struct Pool {
     senders: Vec<Sender<Arc<Job>>>,
     threads: Vec<JoinHandle<()>>,
-    signal: Arc<Condvar>,
-    mutex: Mutex<bool>,
 }
 
 impl Job {
-    fn execute(&self, signal: &Condvar) {
+    fn execute(&self) {
         loop {
             let index = self.work_index.fetch_add(1, Ordering::Relaxed);
             if index >= self.num {
-                self.done_index.fetch_add(1, Ordering::Relaxed);
-                signal.notify_one();
+                let mut guard = self.done_mutex.lock().unwrap();
+                *guard += 1;
+                self.signal.notify_one();
                 break;
             }
             (self.func)(self.elems, self.num, index);
         }
     }
-    fn wait(&self, signal: &Condvar, mutex: &Mutex<bool>, num: usize) {
-        while self.done_index.load(Ordering::Relaxed) < num {
-            let _ = signal
-                .wait(mutex.lock().unwrap())
+    fn wait(&self, num: usize) {
+        loop {
+            let guard = self.done_mutex.lock().unwrap();
+            if *guard >= num {
+                break;
+            }
+            let _ = self
+                .signal
+                .wait(guard)
                 .expect("condvar wait should never fail");
         }
     }
@@ -46,20 +51,16 @@ impl Job {
 
 impl Pool {
     pub fn new() -> Self {
-        let num_threads = sys_info::cpu_num().unwrap_or(10);
-        let signal = Arc::new(Condvar::new());
+        let num_threads = sys_info::cpu_num().unwrap_or(16) - 1;
         let mut pool = Self {
             senders: vec![],
             threads: vec![],
-            signal: signal.clone(),
-            mutex: Mutex::new(false),
         };
         (0..num_threads).for_each(|_| {
             let (sender, recvr): (Sender<Arc<Job>>, Receiver<Arc<Job>>) = channel();
-            let signal = signal.clone();
             let t = spawn(move || {
                 for job in recvr.iter() {
-                    job.execute(&signal)
+                    job.execute()
                 }
             });
             pool.senders.push(sender);
@@ -75,8 +76,9 @@ impl Pool {
         let job = Job {
             elems: elems.as_mut_ptr() as *mut u64,
             num: elems.len(),
+            done_mutex: Arc::new(Mutex::new(0)),
             work_index: AtomicUsize::new(0),
-            done_index: AtomicUsize::new(0),
+            signal: Arc::new(Condvar::new()),
             func: Box::new(move |ptr, num, index| {
                 let ptr = ptr as *mut A;
                 let slice = unsafe { std::slice::from_raw_parts_mut(ptr, num) };
@@ -87,8 +89,8 @@ impl Pool {
         for s in &self.senders {
             s.send(job.clone()).expect("send should never fail");
         }
-        job.execute(&self.signal);
-        job.wait(&self.signal, &self.mutex, self.senders.len() + 1);
+        job.execute();
+        job.wait(self.senders.len() + 1);
     }
 }
 
