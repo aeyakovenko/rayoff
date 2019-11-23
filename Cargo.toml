@@ -1,6 +1,9 @@
 [package]
-name = "fastpool"
+name = "rayoff"
 version = "0.1.0"
 authors = ["Anatoly Yakovenko <anatoly@solana.com>"]
 
 [dependencies]
+
+[dev-dependencies]
+rayon = "1.1"
