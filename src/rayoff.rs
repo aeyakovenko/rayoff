@@ -1,5 +1,4 @@
 extern crate sys_info;
-extern crate spin;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -63,7 +62,7 @@ impl Pool {
         pool
     }
 
-    pub fn dispatch_mut<F, A>(&self, elems: &mut [A], func: Box<F>)
+    pub fn dispatch_mut<F, A>(&self, elems: &mut [A], func: F)
     where
         F: Fn(&mut A) + 'static,
     {
@@ -94,7 +93,7 @@ mod tests {
     fn test_pool() {
         let pool = Pool::new();
         let mut array = [0usize; 100];
-        pool.dispatch_mut(&mut array, Box::new(|val: &mut usize| *val += 1));
+        pool.dispatch_mut(&mut array, |val: &mut usize| *val += 1);
         let expected = [1usize; 100];
         for i in 0..100 {
             assert_eq!(array[i], expected[i]);

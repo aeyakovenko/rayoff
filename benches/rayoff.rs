@@ -12,7 +12,7 @@ fn bench_pool(bencher: &mut Bencher) {
     let pool = Pool::new();
     bencher.iter(|| {
         let mut array = [0usize; 100];
-        pool.dispatch_mut(&mut array, Box::new(|val: &mut usize| *val += 1));
+        pool.dispatch_mut(&mut array, |val: &mut usize| *val += 1);
         let expected = [1usize; 100];
         for i in 0..100 {
             assert_eq!(array[i], expected[i]);
