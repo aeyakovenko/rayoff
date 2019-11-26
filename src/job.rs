@@ -11,24 +11,27 @@ pub struct Job {
     done_index: AtomicUsize,
 }
 
-//Safe because Job only lives for the duration of the dispatch call
-//and any thread lifetimes are within that call
+/// Safe because Job only lives for the duration of the dispatch call
+/// and any thread lifetimes are within that call
 unsafe impl Send for Job {}
-//Safe because data is either atomic or read only
+
+/// Safe because data is either atomic or read only
 unsafe impl Sync for Job {}
 
 type Progress = extern "C" fn(*mut c_void, *mut c_void, u64);
 
 impl Job {
-    pub fn new<F, A>(elems: &mut [A], func: F) -> Self
+    /// This function is unsafe because the Job object must
+    /// be destroyed before `elems` and `func` arguments.
+    pub unsafe fn new<F, A>(elems: &mut [A], func: F) -> Self
     where
         F: Fn(&mut A) + Send + Sync,
     {
         let mut closure = |ptr: *mut c_void, index: u64| {
-            let elem: &mut A = unsafe { std::mem::transmute((ptr as *mut A).add(index as usize)) };
+            let elem: &mut A = std::mem::transmute((ptr as *mut A).add(index as usize));
             (func)(elem)
         };
-        let (ctx, func) = unsafe { Job::unpack_closure(&mut closure) };
+        let (ctx, func) = Job::unpack_closure(&mut closure);
         Self {
             elems: elems.as_mut_ptr() as *mut c_void,
             num: elems.len() as u64,
@@ -39,7 +42,8 @@ impl Job {
         }
     }
 
-    // https://s3.amazonaws.com/temp.michaelfbryan.com/callbacks/index.html?search=
+    /// This function unpacks the closure into a context and a trampoline
+    /// Source: https://s3.amazonaws.com/temp.michaelfbryan.com/callbacks/index.html
     unsafe fn unpack_closure<F>(closure: &mut F) -> (*mut c_void, Progress)
     where
         F: FnMut(*mut c_void, u64),

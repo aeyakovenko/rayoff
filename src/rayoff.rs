@@ -36,7 +36,8 @@ impl Pool {
     where
         F: Fn(&mut A) + Send + Sync,
     {
-        let job = Job::new(elems, func);
+        // Job must be destroyed in the frame that its created
+        let job = unsafe { Job::new(elems, func) };
         let job = Arc::new(job);
         for s in &self.senders {
             s.send(job.clone()).expect("send should never fail");
