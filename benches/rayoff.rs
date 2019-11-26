@@ -9,7 +9,7 @@ use test::Bencher;
 
 #[bench]
 fn bench_pool(bencher: &mut Bencher) {
-    let pool = Pool::new();
+    let pool = Pool::default();
     bencher.iter(|| {
         let mut array = [0usize; 100];
         pool.dispatch_mut(&mut array, |val: &mut usize| *val += 1);
