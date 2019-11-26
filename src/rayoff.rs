@@ -12,14 +12,19 @@ struct Job {
     work_index: AtomicUsize,
     done_index: AtomicUsize,
 }
+
+struct JobPtr {
+    pub job: *const Job,
+}
+
 //Safe because Job only lives for the duration of the dispatch call
 //and any thread lifetimes are within that call
-unsafe impl Send for Job {}
+unsafe impl Send for JobPtr {}
 //Safe because data is either atomic or read only
-unsafe impl Sync for Job {}
+unsafe impl Sync for JobPtr {}
 
 pub struct Pool {
-    senders: Vec<Sender<Arc<Job>>>,
+    senders: Vec<Sender<Arc<JobPtr>>>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -53,9 +58,10 @@ impl Default for Pool {
             threads: vec![],
         };
         (0..num_threads).for_each(|_| {
-            let (sender, recvr): (Sender<Arc<Job>>, Receiver<Arc<Job>>) = channel();
+            let (sender, recvr): (Sender<Arc<JobPtr>>, Receiver<Arc<JobPtr>>) = channel();
             let t = spawn(move || {
-                for job in recvr.iter() {
+                for jobptr in recvr.iter() {
+                    let job: &Job = unsafe {std::mem::transmute(jobptr.job) };
                     job.execute()
                 }
             });
@@ -67,26 +73,29 @@ impl Default for Pool {
 }
 
 impl Pool {
-    pub fn dispatch_mut<F, A>(&self, elems: &mut [A], func: &F)
+    pub fn dispatch_mut<F, A>(&self, elems: &mut [A], func: F)
     where
         F: Fn(&mut A) + Send + Sync,
     {
-        let elems: &'static mut [A] = unsafe {std::mem::transmute(elems)};
-        let func:&'static (dyn Fn(&'static mut A) + 'static) = unsafe {std::mem::transmute(func)};
+        let box_func = Box::into_raw(Box::new(func));
+        let func_ptr = box_func as *mut _;
+        let func: &'static dyn Fn(&'static mut A) = unsafe { std::mem::transmute(func_ptr) };
+        let closure = |ptr: *mut u64, num: usize, index: usize| {
+                let ptr: *mut A = unsafe {std::mem::transmute(ptr) };
+                let slice = unsafe { std::slice::from_raw_parts_mut(ptr, num) };
+                func(&mut slice[index])
+        };
         let job = Job {
             elems: elems.as_mut_ptr() as *mut u64,
             num: elems.len(),
             done_index: AtomicUsize::new(0),
             work_index: AtomicUsize::new(0),
-            func: Box::new(move |ptr, num, index| {
-                let ptr = ptr as *mut A;
-                let slice = unsafe { std::slice::from_raw_parts_mut(ptr, num) };
-                func(&mut slice[index])
-            }),
+            func: Box::new(closure),
         };
-        let job = Arc::new(job);
+        let jobptr = JobPtr { job: &job as *const Job };
+        let jobptr = Arc::new(jobptr);
         for s in &self.senders {
-            s.send(job.clone()).expect("send should never fail");
+            s.send(jobptr.clone()).expect("send should never fail");
         }
         job.execute();
         job.wait(self.senders.len() + 1);
@@ -113,7 +122,7 @@ mod tests {
     fn test_pool() {
         let pool = Pool::default();
         let mut array = [0usize; 100];
-        pool.dispatch_mut(&mut array, |val: &mut usize| *val += 1);
+        pool.dispatch_mut(&mut array, Box::new(|val: &mut usize| *val += 1));
         let expected = [1usize; 100];
         for i in 0..100 {
             assert_eq!(array[i], expected[i]);
