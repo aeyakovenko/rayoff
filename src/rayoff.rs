@@ -1,53 +1,14 @@
 extern crate sys_info;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use std::thread::{spawn, yield_now, JoinHandle};
-
-struct Job {
-    func: Box<dyn Fn(*mut u64, usize, usize)>,
-    elems: *mut u64,
-    num: usize,
-    work_index: AtomicUsize,
-    done_index: AtomicUsize,
-}
-
-struct JobPtr {
-    pub job: *const Job,
-}
-
-//Safe because Job only lives for the duration of the dispatch call
-//and any thread lifetimes are within that call
-unsafe impl Send for JobPtr {}
-//Safe because data is either atomic or read only
-unsafe impl Sync for JobPtr {}
+use std::thread::{spawn, JoinHandle};
+use job::Job;
 
 pub struct Pool {
-    senders: Vec<Sender<Arc<JobPtr>>>,
+    senders: Vec<Sender<Arc<Job>>>,
     threads: Vec<JoinHandle<()>>,
-}
-
-impl Job {
-    fn execute(&self) {
-        loop {
-            let index = self.work_index.fetch_add(1, Ordering::Relaxed);
-            if index >= self.num {
-                self.done_index.fetch_add(1, Ordering::Relaxed);
-                break;
-            }
-            (self.func)(self.elems, self.num, index);
-        }
-    }
-    fn wait(&self, num: usize) {
-        loop {
-            let guard = self.done_index.load(Ordering::Relaxed);
-            if guard >= num {
-                break;
-            }
-            yield_now();
-        }
-    }
 }
 
 impl Default for Pool {
@@ -58,10 +19,9 @@ impl Default for Pool {
             threads: vec![],
         };
         (0..num_threads).for_each(|_| {
-            let (sender, recvr): (Sender<Arc<JobPtr>>, Receiver<Arc<JobPtr>>) = channel();
+            let (sender, recvr): (Sender<Arc<Job>>, Receiver<Arc<Job>>) = channel();
             let t = spawn(move || {
-                for jobptr in recvr.iter() {
-                    let job: &Job = unsafe {std::mem::transmute(jobptr.job) };
+                for job in recvr.iter() {
                     job.execute()
                 }
             });
@@ -77,25 +37,24 @@ impl Pool {
     where
         F: Fn(&mut A) + Send + Sync,
     {
-        let box_func = Box::into_raw(Box::new(func));
-        let func_ptr = box_func as *mut _;
-        let func: &'static dyn Fn(&'static mut A) = unsafe { std::mem::transmute(func_ptr) };
-        let closure = |ptr: *mut u64, num: usize, index: usize| {
+        let func_ptr = Box::into_raw(Box::new(func)) as *mut _;
+        let closure = |ptr: *mut (), index: usize| {
                 let ptr: *mut A = unsafe {std::mem::transmute(ptr) };
-                let slice = unsafe { std::slice::from_raw_parts_mut(ptr, num) };
-                func(&mut slice[index])
+                let elem: &mut A = unsafe { std::mem::transmute(ptr.add(index)) };
+                let func: &dyn Fn(&mut A) = unsafe { std::mem::transmute(func_ptr) };
+                (func)(elem)
         };
+        let closure_ptr = Box::into_raw(Box::new(closure)) as *mut _;
         let job = Job {
-            elems: elems.as_mut_ptr() as *mut u64,
+            elems: elems.as_mut_ptr() as *mut _,
             num: elems.len(),
             done_index: AtomicUsize::new(0),
             work_index: AtomicUsize::new(0),
-            func: Box::new(closure),
+            func: closure_ptr,
         };
-        let jobptr = JobPtr { job: &job as *const Job };
-        let jobptr = Arc::new(jobptr);
+        let job = Arc::new(job);
         for s in &self.senders {
-            s.send(jobptr.clone()).expect("send should never fail");
+            s.send(job.clone()).expect("send should never fail");
         }
         job.execute();
         job.wait(self.senders.len() + 1);
