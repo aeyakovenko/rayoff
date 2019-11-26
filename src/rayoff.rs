@@ -1,10 +1,9 @@
 extern crate sys_info;
 
-use std::sync::atomic::{AtomicUsize};
+use job::Job;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{spawn, JoinHandle};
-use job::Job;
 
 pub struct Pool {
     senders: Vec<Sender<Arc<Job>>>,
@@ -37,21 +36,7 @@ impl Pool {
     where
         F: Fn(&mut A) + Send + Sync,
     {
-        let func_ptr = Box::into_raw(Box::new(func)) as *mut _;
-        let closure = |ptr: *mut (), index: usize| {
-                let ptr: *mut A = unsafe {std::mem::transmute(ptr) };
-                let elem: &mut A = unsafe { std::mem::transmute(ptr.add(index)) };
-                let func: &dyn Fn(&mut A) = unsafe { std::mem::transmute(func_ptr) };
-                (func)(elem)
-        };
-        let closure_ptr = Box::into_raw(Box::new(closure)) as *mut _;
-        let job = Job {
-            elems: elems.as_mut_ptr() as *mut _,
-            num: elems.len(),
-            done_index: AtomicUsize::new(0),
-            work_index: AtomicUsize::new(0),
-            func: closure_ptr,
-        };
+        let job = Job::new(elems, func);
         let job = Arc::new(job);
         for s in &self.senders {
             s.send(job.clone()).expect("send should never fail");

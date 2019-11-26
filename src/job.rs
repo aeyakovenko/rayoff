@@ -1,10 +1,12 @@
+use std::os::raw::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::{yield_now};
+use std::thread::yield_now;
 
 pub struct Job {
-    func: *mut (),
-    elems: *mut (),
-    num: usize,
+    func: Progress,
+    ctx: *mut c_void,
+    elems: *mut c_void,
+    num: u64,
     work_index: AtomicUsize,
     done_index: AtomicUsize,
 }
@@ -15,16 +17,51 @@ unsafe impl Send for Job {}
 //Safe because data is either atomic or read only
 unsafe impl Sync for Job {}
 
+type Progress = extern "C" fn(*mut c_void, *mut c_void, u64);
+
 impl Job {
+    pub fn new<F, A>(elems: &mut [A], func: F) -> Self
+    where
+        F: Fn(&mut A) + Send + Sync,
+    {
+        let mut closure = |ptr: *mut c_void, index: u64| {
+            let elem: &mut A = unsafe { std::mem::transmute((ptr as *mut A).add(index as usize)) };
+            (func)(elem)
+        };
+        let (ctx, func) = unsafe { Job::unpack_closure(&mut closure) };
+        Self {
+            elems: elems.as_mut_ptr() as *mut c_void,
+            num: elems.len() as u64,
+            done_index: AtomicUsize::new(0),
+            work_index: AtomicUsize::new(0),
+            func,
+            ctx,
+        }
+    }
+
+    // https://s3.amazonaws.com/temp.michaelfbryan.com/callbacks/index.html?search=
+    unsafe fn unpack_closure<F>(closure: &mut F) -> (*mut c_void, Progress)
+    where
+        F: FnMut(*mut c_void, u64),
+    {
+        extern "C" fn trampoline<F>(data: *mut c_void, elems: *mut c_void, n: u64)
+        where
+            F: FnMut(*mut c_void, u64),
+        {
+            let closure: &mut F = unsafe { &mut *(data as *mut F) };
+            (*closure)(elems, n);
+        }
+
+        (closure as *mut F as *mut c_void, trampoline::<F>)
+    }
     pub fn execute(&self) {
         loop {
             let index = self.work_index.fetch_add(1, Ordering::Relaxed);
-            if index >= self.num {
+            if index as u64 >= self.num {
                 self.done_index.fetch_add(1, Ordering::Relaxed);
                 break;
             }
-            let func: &dyn Fn(*mut (), usize) = unsafe {std::mem::transmute(self.func) };
-            (func)(self.elems, index);
+            (self.func)(self.ctx, self.elems, index as u64);
         }
     }
     pub fn wait(&self, num: usize) {
