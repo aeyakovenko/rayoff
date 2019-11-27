@@ -3,7 +3,7 @@ extern crate rayoff;
 extern crate rayon;
 extern crate test;
 
-use rayoff::rayoff::Pool;
+use rayoff::pool::Pool;
 use rayon::prelude::*;
 use test::Bencher;
 
